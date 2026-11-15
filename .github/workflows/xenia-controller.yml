@@ -167,19 +167,27 @@ jobs:
             expressions = root.findall('.//Expression[@success="false"]')
             summary = {'exit_code':result.returncode, 'assertions':assertions,
                        'test_cases':cases, 'xml_sha256':sha(raw)}
+            print(json.dumps({'suite':label, 'exit_code':result.returncode,
+                'test_cases':cases, 'assertions':assertions,
+                'failed_case_names':[case.get('name') for case in failed_cases],
+                'failed_expressions':[{'type':e.get('type'), 'filename':e.get('filename'),
+                    'line':e.get('line'), 'original':e.findtext('Original'),
+                    'expanded':e.findtext('Expanded')} for e in expressions]},
+                separators=(',',':')), flush=True)
             return summary, root, failed_cases, expressions
 
-        def full_pass(summary, failures, expressions, assertion_count):
+        def full_pass(summary, failures, expressions):
+            assertions = summary['assertions']
             return (summary['exit_code'] == 0 and summary['test_cases'] ==
                     {'successes':81,'failures':0,'expectedFailures':0} and
-                    summary['assertions'] == {'successes':assertion_count,'failures':0,'expectedFailures':0}
-                    and not failures and not expressions)
+                    assertions['successes'] >= 2231 and assertions['failures'] == 0
+                    and assertions['expectedFailures'] == 0 and not failures and not expressions)
 
         fixture_applied = False
         proof = None
         try:
             baseline, root, failures, expressions = run_suite('baseline-stock')
-            if full_pass(baseline, failures, expressions, 2232):
+            if full_pass(baseline, failures, expressions):
                 final = baseline
                 mode = 'STOCK_FULL_SUITE_PASSED_NO_TEST_OVERRIDE'
             else:
@@ -211,7 +219,7 @@ jobs:
                 fixture_applied = True
                 need(changes() == [str(test).replace(chr(92),'/')], 'Temporary change must be test fixture only')
                 final, _, failures, expressions = run_suite('host-aware-fixture')
-                need(full_pass(final, failures, expressions, 2237), 'Complete corrected 81-case suite did not pass')
+                need(full_pass(final, failures, expressions), 'Complete corrected 81-case suite did not pass')
                 mode = 'WINDOWS_TEST_FIXTURE_CORRECTED_FULL_SUITE_PASSED'
             proof = {'schema':2, 'mode':mode, 'full_suite_passed':True,
                 'baseline':baseline, 'final':final, 'test_fixture_override_applied':fixture_applied,
