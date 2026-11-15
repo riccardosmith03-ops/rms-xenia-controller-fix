@@ -1,0 +1,13 @@
+{
+  "time": "2026-11-15T15:08:39.725295+01:00",
+  "upstream_sha": "4f04bc7cc76b89bfcf7327b597d9770eaaddf935",
+  "only_modified_upstream_file": "src/xenia/hid/input_system.cc",
+  "upstream_source_sha256": "d12af3ce2fcb232278eb324e08718a85fc836a3aec1db7450f930945e649bca7",
+  "modified_source_sha256": "0b5b64d5bc24b2a13d736810c3cac34dad631f65904c8a88e2fea5b05659f49e",
+  "patch_sha256": "03a06d936dd3f680558867c6752137433554d9edc03bc064d1503c8149c36a46",
+  "license_sha256": "369ea6b0f7ba57544067e9d470ca82a927da787fb0a749b11cb55f1fd0ba47ae",
+  "default_behavior_unchanged": true,
+  "needed_runtime_setting": "[HID] enable_hardware_portal=false before app setup",
+  "effect": "Skip construction of optional USB Skylanders portal; keep existing XInput, GPU, patches and saves code",
+  "not_compiled_or_published": true
+}

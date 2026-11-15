@@ -1,0 +1,215 @@
+name: Build Xenia with optional USB portal
+
+# Manual build only. No game, profile, save, device report or private source is used.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xenia-controller-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      POWERSHELL_TELEMETRY_OPTOUT: '1'
+      VSCMD_SKIP_SENDTELEMETRY: '1'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      UPSTREAM_SHA: 4f04bc7cc76b89bfcf7327b597d9770eaaddf935
+      PATCH_SHA256: 03a06d936dd3f680558867c6752137433554d9edc03bc064d1503c8149c36a46
+      ORIGINAL_SHA256: d12af3ce2fcb232278eb324e08718a85fc836a3aec1db7450f930945e649bca7
+      MODIFIED_SHA256: 0b5b64d5bc24b2a13d736810c3cac34dad631f65904c8a88e2fea5b05659f49e
+      LICENSE_SHA256: 369ea6b0f7ba57544067e9d470ca82a927da787fb0a749b11cb55f1fd0ba47ae
+      VULKAN_VERSION: 1.4.363.1
+      VULKAN_SHA256: c02932bd9a968b22d404536108adaacac908c081cd6b0113f5bfefc523dd0a6a
+
+    steps:
+      - name: Keep reviewed source bytes unchanged
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git config --global core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot configure Git line endings' }
+          git config --global core.eol lf
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot configure Git EOL' }
+          git config --global core.longpaths true
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot configure Git long paths' }
+
+      - name: Checkout reviewed public carrier
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6, official tag verified 2026-11-15
+        with:
+          ref: ${{ github.sha }}
+          path: carrier
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout exact upstream and pinned recursive submodules
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          repository: xenia-canary/xenia-canary
+          ref: 4f04bc7cc76b89bfcf7327b597d9770eaaddf935
+          path: source
+          submodules: recursive
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify provenance and apply only the reviewed portal guard
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Assert-Hash($Path, $Expected) {
+            if ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Expected) {
+              throw "SHA256 mismatch: $Path"
+            }
+          }
+          if ((git rev-parse HEAD).Trim() -ne $env:UPSTREAM_SHA -or $LASTEXITCODE -ne 0) { throw 'Wrong upstream commit' }
+          if (@(git status --porcelain).Count -ne 0) { throw 'Upstream checkout is not clean' }
+          $p = Get-Content -LiteralPath ../carrier/SOURCE-PROVENANCE.json -Raw | ConvertFrom-Json
+          if ($p.upstream_sha -ne $env:UPSTREAM_SHA -or
+              $p.only_modified_upstream_file -ne 'src/xenia/hid/input_system.cc' -or
+              $p.patch_sha256 -ne $env:PATCH_SHA256 -or
+              $p.upstream_source_sha256 -ne $env:ORIGINAL_SHA256 -or
+              $p.modified_source_sha256 -ne $env:MODIFIED_SHA256 -or
+              $p.license_sha256 -ne $env:LICENSE_SHA256) { throw 'Carrier provenance differs from review' }
+          Assert-Hash ../carrier/portal-optional.patch $env:PATCH_SHA256
+          Assert-Hash ../carrier/LICENSE $env:LICENSE_SHA256
+          Assert-Hash LICENSE $env:LICENSE_SHA256
+          Assert-Hash src/xenia/hid/input_system.cc $env:ORIGINAL_SHA256
+          $submodules = @(git submodule status --recursive)
+          if ($LASTEXITCODE -ne 0 -or $submodules.Count -eq 0) { throw 'Cannot verify pinned submodules' }
+          foreach ($line in $submodules) {
+            if ($line -notmatch '^ [0-9a-f]{40} ') { throw 'Submodule is missing or differs from its gitlink' }
+          }
+          git apply --check ../carrier/portal-optional.patch
+          if ($LASTEXITCODE -ne 0) { throw 'Patch does not apply to exact upstream' }
+          git apply ../carrier/portal-optional.patch
+          if ($LASTEXITCODE -ne 0) { throw 'Patch application failed' }
+          Assert-Hash src/xenia/hid/input_system.cc $env:MODIFIED_SHA256
+          $changed = @(git diff --name-only)
+          if ($LASTEXITCODE -ne 0 -or $changed.Count -ne 1 -or $changed[0] -ne 'src/xenia/hid/input_system.cc') { throw 'Unexpected source changes' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Patch whitespace check failed' }
+          Write-Output 'PASS_EXACT_UPSTREAM_PINNED_SUBMODULES_AND_ONLY_REVIEWED_PORTAL_GUARD'
+
+      - name: Install pinned official Vulkan SDK on disposable runner
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # SHA256/size published by https://vulkan.lunarg.com/sdk/files.json.
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk-pinned.exe'
+          $url = "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          Invoke-WebRequest -Uri $url -OutFile $installer -TimeoutSec 300
+          if ((Get-Item -LiteralPath $installer).Length -ne 303066832) { throw 'Vulkan installer size mismatch' }
+          if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:VULKAN_SHA256) { throw 'Vulkan installer SHA256 mismatch' }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer
+          if ($signature.Status -ne 'Valid') { throw 'Vulkan installer signature is not valid' }
+          $setup = Start-Process -FilePath $installer -ArgumentList '--accept-licenses','--default-answer','--confirm-command','install' -WindowStyle Hidden -Wait -PassThru
+          if ($setup.ExitCode -ne 0) { throw "Vulkan installer failed: $($setup.ExitCode)" }
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          foreach ($tool in @('glslangValidator.exe','spirv-opt.exe','spirv-dis.exe')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $sdk "Bin\$tool"))) { throw "Required SDK tool missing: $tool" }
+          }
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "$sdk\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Build only upstream xenia-app target in Release
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Same build entry point and target as upstream Windows_x86.yml.
+          python xenia-build.py build --config=release --target=xenia-app
+          if ($LASTEXITCODE -ne 0) { throw 'Release app build failed' }
+
+      - name: Run upstream host base tests without a game or USB portal
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python xenia-build.py test --config=release --target=xenia-base-tests
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream host base tests failed' }
+          Write-Output 'PASS_UPSTREAM_HOST_BASE_TESTS_NOT_CONTROLLER_RUNTIME_PROOF'
+
+      - name: Verify x64 PE and stage exactly three public artifact files
+        working-directory: source
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $inputPath = 'src/xenia/hid/input_system.cc'
+          if ((Get-FileHash -LiteralPath $inputPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $env:MODIFIED_SHA256) { throw 'Reviewed source changed during build' }
+          $changed = @(git diff --name-only)
+          if ($LASTEXITCODE -ne 0 -or $changed.Count -ne 1 -or $changed[0] -ne $inputPath) { throw 'Unexpected tracked source changes after build' }
+          $exe = 'build/bin/Windows/Release/xenia_canary.exe'
+          if ((Get-Item -LiteralPath $exe).Length -le 100000) { throw 'Built app is unexpectedly small' }
+          $stream = [IO.File]::OpenRead((Resolve-Path -LiteralPath $exe).Path)
+          $reader = [IO.BinaryReader]::new($stream)
+          try {
+            if ($reader.ReadUInt16() -ne 0x5A4D) { throw 'Missing MZ header' }
+            $stream.Position = 0x3C
+            $peOffset = $reader.ReadInt32()
+            if ($peOffset -lt 0x40 -or $peOffset -gt ($stream.Length - 24)) { throw 'Invalid PE offset' }
+            $stream.Position = $peOffset
+            if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664) { throw 'App is not a Windows x64 PE' }
+          } finally { $reader.Dispose() }
+          $stage = Join-Path $env:RUNNER_TEMP 'xenia-controller-artifact'
+          if (Test-Path -LiteralPath $stage) { throw 'Artifact staging directory already exists' }
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $stage 'xenia_canary.exe')
+          Copy-Item -LiteralPath LICENSE -Destination (Join-Path $stage 'LICENSE')
+          $submodules = @(git submodule status --recursive)
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot record submodules' }
+          $submodulePins = @()
+          foreach ($line in $submodules) {
+            if ($line -notmatch '^ ([0-9a-f]{40}) ([^ ]+)') { throw 'Submodule pin changed during build' }
+            $submodulePins += [ordered]@{ path = $Matches[2]; commit = $Matches[1] }
+          }
+          $receipt = [ordered]@{
+            schema = 1
+            generated_utc = [DateTime]::UtcNow.ToString('o')
+            repository = $env:GITHUB_REPOSITORY
+            carrier_commit = $env:GITHUB_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            run_url = "https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            runner = 'windows-2022 standard'
+            runner_image_version = $env:ImageVersion
+            upstream_repository = 'xenia-canary/xenia-canary'
+            upstream_commit = $env:UPSTREAM_SHA
+            patch_sha256 = $env:PATCH_SHA256
+            original_input_system_sha256 = $env:ORIGINAL_SHA256
+            modified_input_system_sha256 = $env:MODIFIED_SHA256
+            vulkan_sdk_version = $env:VULKAN_VERSION
+            vulkan_installer_sha256 = $env:VULKAN_SHA256
+            submodules = $submodulePins
+            app_filename = 'xenia_canary.exe'
+            app_bytes = (Get-Item -LiteralPath $exe).Length
+            app_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+            license_sha256 = (Get-FileHash -LiteralPath LICENSE -Algorithm SHA256).Hash.ToLowerInvariant()
+            pe_machine = 'AMD64'
+            host_base_tests_passed = $true
+            app_executed_in_ci = $false
+            controller_reconnect_verified = $false
+            game_runtime_verified = $false
+            required_runtime_setting = '[HID] enable_hardware_portal=false before app setup'
+            change_scope = 'Optional USB Skylanders portal guard only; no libusb or game-code changes'
+            artifact_allowlist = @('xenia_canary.exe','LICENSE','BUILD-RECEIPT.json')
+          }
+          $receipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $stage 'BUILD-RECEIPT.json') -Encoding utf8
+          if (@(Get-ChildItem -LiteralPath $stage -File).Count -ne 3) { throw 'Unexpected artifact staging contents' }
+          Write-Output 'PASS_X64_PE_AND_EXPLICIT_PUBLIC_ARTIFACT_ALLOWLIST_NOT_CONTROLLER_RUNTIME_PROOF'
+
+      - name: Upload only app, license and public provenance receipt
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7, official tag verified 2026-11-15
+        with:
+          name: xenia-canary-controller-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/xenia-controller-artifact/xenia_canary.exe
+            ${{ runner.temp }}/xenia-controller-artifact/LICENSE
+            ${{ runner.temp }}/xenia-controller-artifact/BUILD-RECEIPT.json
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: false
+          archive: true
+          overwrite: false
