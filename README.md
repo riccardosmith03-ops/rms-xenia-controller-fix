@@ -18,9 +18,19 @@ The setting must be loaded before application setup. A per-game override loaded 
 
 ## Build scope and provenance
 
-`portal-optional.patch` modifies only `src/xenia/hid/input_system.cc`. `SOURCE-PROVENANCE.json` records the expected upstream and modified source hashes. The manual workflow pins the upstream revision, verifies the source, applies the patch, builds only the application on a standard Windows runner, and uploads an explicit executable/license/receipt file list.
+`portal-optional.patch` modifies only `src/xenia/hid/input_system.cc`. `SOURCE-PROVENANCE.json` records the expected upstream and modified source hashes. The manual workflow pins the upstream revision, verifies the source and dependencies, runs the host validation below, applies the production patch, and builds the application on a standard Windows runner. It uploads only the executable, license and public build receipt.
 
 No games, profiles, save files, device reports, personal photos, keys or account credentials belong in this repository or its build inputs. The workflow needs no user-provided secrets and has read-only repository permissions.
+
+## Host validation and the Windows fixture expectation
+
+The first build compiled the application successfully but found one failure in the untouched upstream host suite: `PhysicalHeap vE0000000 alignment`, section `alloc with alignment larger than page_size is rejected` (`physical_heap_test.cc:173`). The stock suite reported 80 passing cases out of 81 and 2,231 passing assertions out of 2,232. On Windows, the host-view offset can compensate for the physical translation offset; the fixture's unconditional rejection expectation does not describe that mapping.
+
+This workflow first runs the complete suite on byte-exact, unmodified upstream source and captures Catch2 XML plus the exit code. It proceeds only if all 81 stock cases pass, or if that exact single known failure and all counts reproduce. Any other result stops the job.
+
+For the reproduced Windows failure, the workflow temporarily changes only that test section to check the actual host-view offset, physical and host alignment, and allocation bounds. It then reruns the entire suite with no test filters or skipped cases: all 81 cases and 2,237 assertions must pass. The fixture is restored to its exact upstream bytes before the portal patch and application build. If the stock suite already passes, no test override is used.
+
+The build receipt records both results, the original/corrected fixture hashes and restoration, and the unchanged production `memory.cc` hash. No production memory/allocator behavior is changed to satisfy a test. Only `input_system.cc` differs in the resulting application source.
 
 ## Validation limits
 
